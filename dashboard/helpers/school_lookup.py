@@ -46,35 +46,19 @@ _PAGE_SIZE = 1000
 
 @st.cache_data(ttl=300, show_spinner=False)
 def get_ufs() -> List[str]:
-    """Lista de UFs distintas em school_censo_yearly (vintage 2024)."""
-    from database.supabase_client import db
-    try:
-        # Paginamos porque pode haver >1000 rows por UF.
-        # Mas como queremos DISTINCT state, basta extrair um set.
-        all_states: set = set()
-        offset = 0
-        while True:
-            r = (
-                db.client.table("school_censo_yearly")
-                .select("state")
-                .eq("vintage_censo", 2024)
-                .not_.is_("state", "null")
-                .range(offset, offset + _PAGE_SIZE - 1)
-                .execute()
-            )
-            batch = r.data or []
-            if not batch:
-                break
-            for row in batch:
-                s = row.get("state")
-                if s:
-                    all_states.add(s)
-            if len(batch) < _PAGE_SIZE:
-                break
-            offset += _PAGE_SIZE
-        return sorted(all_states)
-    except Exception:
-        return []
+    """As 27 UFs do Brasil.
+
+    Isto ja foi um DISTINCT paginado sobre school_censo_yearly: ~185 requisicoes
+    lendo o Brasil inteiro (1,28M linhas / 546 MB) pra descobrir 27 siglas — e
+    de novo a cada 5 minutos, quando o cache expirava. Media medida:
+    972 blocos de disco por chamada, 2.204 chamadas = ~16 GB de I/O.
+
+    A lista de UFs e uma constante da geografia brasileira, nao um dado do
+    censo. Conferido em 05/09/2026: o DISTINCT no censo 2024 devolvia
+    exatamente estas 27 — a troca nao muda uma linha da tela.
+    """
+    from dashboard._mec_source import UF_LIST
+    return sorted(UF_LIST)
 
 
 @st.cache_data(ttl=300, show_spinner=False)

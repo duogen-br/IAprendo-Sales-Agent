@@ -534,6 +534,50 @@ def generate_gap_indicator(inep: str) -> Optional[bytes]:
 # GERADOR 3: TREND CHART (serie temporal)
 # ============================================================================
 
+# Memo do benchmark por (cidade, metrica). O valor e o mesmo para TODA escola
+# da cidade — sem isto, um refresh de 131 escolas em 11 cidades recalcula 786
+# vezes o que sao 66 numeros distintos.
+#
+# Escopo: vale dentro de um processo. O job noturno isola cada escola num
+# subprocesso, entao la quem paga a conta e o indice coberto da migration 025;
+# aqui o ganho e no dashboard e no IAlex, que vivem por horas.
+_BENCH_CACHE: dict = {}
+
+
+def _benchmark_municipio(db, city: str, years: list, metric: str) -> dict:
+    """Media da metrica por ano no municipio: {ano: (media, n_escolas)}.
+
+    Era um loop de uma consulta POR ANO, cada uma lendo todas as escolas da
+    cidade daquela safra. Medido no pg_stat_statements: 14.810 chamadas,
+    876 blocos de disco cada, ~99 GB — a consulta que mais consumia I/O do
+    projeto inteiro. Agora e uma consulta so, com os anos num IN, e memoizada.
+    """
+    chave = (str(city or ""), str(metric), tuple(sorted(years)))
+    if chave in _BENCH_CACHE:
+        return _BENCH_CACHE[chave]
+
+    out: dict = {}
+    if city and years:
+        try:
+            r = (db.client.table("school_censo_yearly")
+                 .select(f"vintage_censo,{metric}")
+                 .in_("vintage_censo", list(years))
+                 .eq("city", city)
+                 .execute())
+            por_ano: dict = {}
+            for row in (r.data or []):
+                v = row.get(metric)
+                if v is None:
+                    continue
+                por_ano.setdefault(row.get("vintage_censo"), []).append(float(v))
+            for ano, vals in por_ano.items():
+                out[ano] = (round(sum(vals) / len(vals), 1), len(vals)) if vals else (None, 0)
+        except Exception:
+            out = {}
+    _BENCH_CACHE[chave] = out
+    return out
+
+
 def generate_trend_chart(
     inep: str,
     metric: str = "qt_mat_bas",
@@ -575,20 +619,10 @@ def generate_trend_chart(
     city = school_series[0].get("city") or ""
     state = school_series[0].get("state") or ""
 
-    # Buscar benchmark (media do municipio por ano)
-    bench_vals = []
-    bench_counts = []
-    for year in years:
-        try:
-            r = db.client.table("school_censo_yearly").select(metric).eq(
-                "vintage_censo", year
-            ).eq("city", city).execute()
-            vals = [float(row[metric]) for row in (r.data or []) if row.get(metric) is not None]
-            bench_vals.append(round(sum(vals) / len(vals), 1) if vals else None)
-            bench_counts.append(len(vals))
-        except Exception:
-            bench_vals.append(None)
-            bench_counts.append(0)
+    # Buscar benchmark (media do municipio por ano) — UMA consulta pros N anos.
+    _bench = _benchmark_municipio(db, city, years, metric)
+    bench_vals = [_bench.get(y, (None, 0))[0] for y in years]
+    bench_counts = [_bench.get(y, (None, 0))[1] for y in years]
 
     # Guard: omit benchmark years with unrepresentative sample
     if bench_counts:

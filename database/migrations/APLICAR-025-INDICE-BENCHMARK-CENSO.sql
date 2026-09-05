@@ -1,0 +1,56 @@
+-- ===========================================================================
+-- APLICAR-025 — indice coberto para o benchmark municipal do Censo
+--
+-- POR QUE (medido em 05/09/2026, pg_stat_statements do projeto):
+--   A consulta que MAIS consome I/O do projeto inteiro e o benchmark do
+--   grafico de tendencia:
+--
+--     SELECT qt_mat_bas FROM school_censo_yearly
+--      WHERE vintage_censo = $1 AND city = $2
+--
+--     chamadas ............ 14.810
+--     blocos lidos do disco 12.970.089  (~99 GB)
+--     por chamada ......... 876 blocos
+--     cache hit ratio ..... 23%   (77% das leituras vao ao disco)
+--
+--   O indice idx_sc_yearly_city_vintage JA existe e JA e usado — o problema
+--   nao e achar as linhas, e buscar a coluna no HEAP depois. EXPLAIN da
+--   consulta real (Sao Paulo, 2024):
+--
+--     Bitmap Heap Scan ... Heap Blocks: exact=327
+--     Buffers: shared hit=49 read=290       <- 290 blocos vindos do disco
+--     Execution Time: 296 ms
+--
+--   Ou seja: 12 blocos de indice + 327 de heap. Incluindo as metricas no
+--   proprio indice, o plano vira Index Only Scan e o heap deixa de ser lido.
+--
+-- ESCOPO: so as duas metricas que o codigo pede de fato
+-- (tools/insight_charts.generate_trend_chart, parametro `metric`, default
+-- qt_mat_bas; qt_doc_bas e a outra usada). Nao incluo o resto das colunas —
+-- indice largo demais custa escrita no load anual do censo.
+--
+-- CUSTO: school_censo_yearly tem 1,28M linhas / 546 MB. Este indice adiciona
+-- ~40-60 MB. E aditivo: nao altera dado nem quebra o codigo atual.
+--
+-- CONCORRENTE: CREATE INDEX CONCURRENTLY nao bloqueia escrita, mas NAO pode
+-- rodar dentro de transacao. No SQL Editor do Supabase, rode esta linha
+-- SOZINHA (sem outras statements na mesma execucao).
+-- ===========================================================================
+
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_sc_yearly_city_vintage_cover
+    ON public.school_censo_yearly (city, vintage_censo)
+    INCLUDE (qt_mat_bas, qt_doc_bas);
+
+-- Depois de criar, confirme que o plano virou Index Only Scan:
+--
+--   EXPLAIN (ANALYZE, BUFFERS)
+--   SELECT qt_mat_bas FROM school_censo_yearly
+--    WHERE vintage_censo = 2024 AND city = 'São Paulo';
+--
+-- Esperado: "Index Only Scan using idx_sc_yearly_city_vintage_cover",
+-- com "Heap Fetches: 0" (ou proximo de 0) e buffers na casa das dezenas,
+-- no lugar dos ~339 de hoje.
+--
+-- Se "Heap Fetches" vier alto logo apos a criacao, rode:
+--   VACUUM ANALYZE public.school_censo_yearly;
+-- (o Index Only Scan depende do visibility map estar atualizado).

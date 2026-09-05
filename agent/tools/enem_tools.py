@@ -708,9 +708,18 @@ def _fetch_benchmark_for_insights(inep: str) -> Optional[Dict[str, Any]]:
             "enem_media_mt", "enem_media_redacao", "enem_media_geral",
         ]
         fields = ",".join(metrics)
+        # `mun` vem do proprio school_analytics (peer_mun_nome da escola), entao
+        # e o valor exato — nao ha nada a casar parcialmente. O ilike com %...%
+        # custava caro e era arriscado:
+        #   - o planner descarta idx_sa_mun_dep (ilike nao usa btree) e cai no
+        #     idx_sa_dependencia, lendo 5.937 linhas pra devolver 63:
+        #     4.090 buffers / 2.918 ms contra 51 buffers / 5,9 ms com "=".
+        #   - "%Sao Jose%" casa 58 municipios ("Sao Jose dos Campos", "do Xingu"...).
+        #     Hoje o filtro de UF salva as 11 cidades do CRM (conferido: mesma
+        #     contagem e mesma media nas 11), mas e sorte, nao desenho.
         q = db.client.table("school_analytics").select(fields).eq(
             "enem_amostra_confiavel", True
-        ).ilike("peer_mun_nome", f"%{mun}%").eq(
+        ).eq("peer_mun_nome", mun).eq(
             "enem_dependencia", dep
         )
         if uf:
