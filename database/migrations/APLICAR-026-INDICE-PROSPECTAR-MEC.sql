@@ -1,0 +1,53 @@
+-- ===========================================================================
+-- APLICAR-026 — indice do filtro geografico do Prospectar  [P1 — OPCIONAL]
+--
+-- PRIORIDADE: aplique o 025 PRIMEIRO. Este aqui nao esta entre as consultas
+-- que estouraram o Disk IO Budget (mec_catalog acumula 36M linhas lidas em
+-- seq scan, contra 953M do school_analytics e 118M do school_censo_yearly).
+-- Vale pela LATENCIA da tela, nao pelo alerta.
+--
+-- POR QUE (medido em 05/09/2026):
+--   database/supabase_client._apply_catalog_filters monta o filtro da aba
+--   "Buscar no Brasil" com state / city / admin_dependency / school_size.
+--   Hoje mec_catalog so tem indice em state, city_norm, name_norm e inep_code
+--   — repare que a UI filtra por `city` (coluna crua), e o indice existente e
+--   no `city_norm`. Nao serve.
+--
+--   EXPLAIN do filtro tipico (SP + Sao Paulo + Privada + anos finais, LIMIT 15):
+--
+--     Bitmap Heap Scan on mec_catalog
+--       Recheck Cond: state = 'SP'
+--       Filter: city = 'Sao Paulo' AND admin_dependency = 'Privada' AND ...
+--       Rows Removed by Filter: 20.508      <- le 31.370 pra devolver 15
+--       Heap Blocks: exact=988
+--       Buffers: shared hit=908 read=106
+--       Execution Time: 758 ms
+--
+--   O indice de `state` sozinho traz 31 mil linhas de SP e o resto e filtrado
+--   linha a linha no heap. Com (state, city, admin_dependency) o proprio
+--   indice ja recorta.
+--
+-- ORDEM DAS COLUNAS: da mais seletiva na pratica (state -> city) pra menos
+-- (admin_dependency, ~4 valores distintos). Serve tambem pros filtros que
+-- passam so state, ou state+city, por ser prefixo do indice.
+--
+-- NAO indexei: school_size (usado junto, mas sempre depois dos tres acima, e
+-- alargar o indice custa escrita no load anual); levels_norm (o filtro e
+-- `ilike '%fundamental%'` — wildcard no inicio nao usa btree de jeito nenhum);
+-- matriculas_fund_af (a condicao e OR, o planner nao combinaria).
+--
+-- CUSTO: mec_catalog tem 185k linhas / 90 MB. Este indice adiciona ~8-12 MB.
+-- Aditivo. CONCURRENTLY: rode a linha SOZINHA no SQL Editor (nao pode ir
+-- dentro de transacao com outras statements).
+-- ===========================================================================
+
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_mec_catalog_geo
+    ON public.mec_catalog (state, city, admin_dependency);
+
+-- Conferir depois:
+--   EXPLAIN (ANALYZE, BUFFERS)
+--   SELECT inep_code, name FROM mec_catalog
+--    WHERE state='SP' AND city='São Paulo' AND admin_dependency='Privada'
+--    LIMIT 15;
+-- Esperado: Index Scan/Bitmap usando idx_mec_catalog_geo, com "Rows Removed by
+-- Filter" perto de zero e buffers na casa das dezenas (hoje: 1.014).
