@@ -76,13 +76,28 @@ def load_csv() -> Optional[pd.DataFrame]:
 # ---------------------------------------------------------------------------
 # Cache dos facets do catalogo (distinct estaveis — evita re-query a cada rerun)
 # ---------------------------------------------------------------------------
-@st.cache_data(ttl=600, show_spinner=False)
+# TTL de 24h, nao de 10 minutos. A RPC mec_catalog_facets() faz TRES DISTINCT
+# de tabela cheia sobre mec_catalog (185k linhas / 90 MB cada) pra devolver ~37
+# strings: 27 UFs, ~4 dependencias, ~6 portes. Medido em 07/09/2026:
+# 10.536 blocos de disco (~82 MB) e 2,17 s POR CHAMADA — a consulta com o pior
+# custo marginal do projeto.
+#
+# Esses valores so mudam quando o catalogo inteiro e recarregado
+# (scripts/load_mec_catalog.py), o que acontece uma vez por ano. Reexpirar a
+# cada 10 min era pagar 82 MB de I/O por um dado anual.
+#
+# Efeito colateral aceito: depois de recarregar o catalogo, os filtros da tela
+# levam ate 24h (ou um restart do painel) pra refletir valores novos.
+_TTL_FACETS = 86400  # 24h
+
+
+@st.cache_data(ttl=_TTL_FACETS, show_spinner=False)
 def _cat_facets() -> Dict[str, list]:
     from database.supabase_client import db
     return db.catalog_facets()
 
 
-@st.cache_data(ttl=600, show_spinner=False)
+@st.cache_data(ttl=_TTL_FACETS, show_spinner=False)
 def _cat_total() -> int:
     from database.supabase_client import db
     return db.count_mec_catalog({})

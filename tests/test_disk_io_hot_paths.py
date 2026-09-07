@@ -236,3 +236,43 @@ def test_migration_do_indice_existe_e_e_aditiva():
     assert "concurrently" in sql, "sem CONCURRENTLY o create trava escrita"
     for proibido in ("drop ", "delete ", "truncate", "alter table"):
         assert proibido not in sql, f"migration deixou de ser aditiva: {proibido}"
+
+
+# ---------------------------------------------------------------------------
+# #4 — facets do catalogo: 3 DISTINCT de tabela cheia por ~37 strings
+# ---------------------------------------------------------------------------
+MEC_SOURCE = ROOT / "dashboard" / "_mec_source.py"
+
+
+def test_facets_do_catalogo_tem_ttl_longo():
+    """A RPC mec_catalog_facets() custa ~82 MB de disco e 2,17 s por chamada.
+
+    Ela faz TRES DISTINCT de tabela cheia sobre mec_catalog (185k linhas) pra
+    devolver 27 UFs + ~4 dependencias + ~6 portes — valores que so mudam na
+    recarga anual do catalogo. Com TTL de 10 min, o painel pagava isso a cada
+    10 minutos de uso.
+    """
+    import dashboard._mec_source as ms
+    assert ms._TTL_FACETS >= 3600, (
+        "o TTL dos facets do catalogo voltou a ser curto — cada expiracao "
+        "custa ~82 MB de I/O por um dado que muda uma vez por ano")
+
+
+def test_facets_e_total_usam_o_mesmo_ttl():
+    """Os dois batem na mesma tabela pesada; TTLs diferentes so criam surpresa."""
+    fonte = MEC_SOURCE.read_text(encoding="utf-8")
+    tree = ast.parse(fonte)
+    alvos = {"_cat_facets", "_cat_total"}
+    vistos = {}
+    for n in ast.walk(tree):
+        if not (isinstance(n, ast.FunctionDef) and n.name in alvos):
+            continue
+        for dec in n.decorator_list:
+            if not isinstance(dec, ast.Call):
+                continue
+            for kw in dec.keywords:
+                if kw.arg == "ttl":
+                    vistos[n.name] = ast.dump(kw.value)
+    assert len(vistos) == 2, f"nao achei o cache das duas funcoes: {vistos}"
+    assert len(set(vistos.values())) == 1, (
+        f"_cat_facets e _cat_total divergiram de TTL: {vistos}")
