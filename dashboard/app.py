@@ -46,7 +46,7 @@ _first_name = (_current_user.get("name") or _username).split()[0]
 _admin = bool(_is_admin_fn(_username))
 
 
-@st.cache_data(ttl=300, show_spinner=False)
+@st.cache_data(ttl=1800, show_spinner=False)  # era 300; reduz carga no banco (27/10/2026)
 def _engine_tick() -> dict:
     """Roda o motor da agenda no load (idempotente; cobre PC local desligado)."""
     try:

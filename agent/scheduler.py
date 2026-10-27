@@ -24,6 +24,35 @@ try:
 except Exception:  # pragma: no cover
     BRT = timezone(timedelta(hours=-3))
 
+# Intervalos das tarefas recorrentes (minutos). Reduzidos em 27/10/2026 para o
+# banco caber no plano gratuito do Supabase (o projeto estourou o limite de
+# Disk IO com ~2,6 milhoes de requisicoes/mes). Cada valor pode ser ajustado
+# sem mexer no codigo pela variavel de ambiente SCHED_<NOME>_MIN.
+SCHEDULE_MINUTES = {
+    "CHECK_REPLIES": 30,          # era 15
+    "HUBSPOT_PULL": 60,           # era 15
+    "AUTO_REPLIES": 30,           # era 15
+    "SEND_SCHEDULED": 15,         # era 5 (envio continua so na janela comercial)
+    "DYNAMIC_SCORES": 360,        # era 30 (varre todas as escolas)
+    "BUYING_SIGNALS": 360,        # era 30
+    "URGENCY_SCORES": 360,        # era 30 (varre todas as escolas)
+    "AUTO_HEAL": 120,             # era 30
+    "ACTIVITY_ENGINE": 60,        # era 30
+    "OUTLOOK_POLL": 60,           # era 15
+    "PRE_MEETING": 15,            # era 5 (janela de 35 min, com dedupe)
+    "POST_MEETING": 60,           # era 15
+}
+
+
+def sched_minutes(name: str) -> int:
+    """Intervalo em minutos da tarefa `name`, com override por SCHED_<NOME>_MIN."""
+    default = SCHEDULE_MINUTES[name]
+    try:
+        value = int(os.getenv(f"SCHED_{name}_MIN", default))
+        return value if value > 0 else default
+    except (TypeError, ValueError):
+        return default
+
 # Janela de envio automatico (BRT): envia somente entre 8h e 18h.
 BUSINESS_SEND_START, BUSINESS_SEND_END = 8, 18
 
@@ -116,27 +145,27 @@ class IALexScheduler:
         schedule.every().day.at("13:00").do(self._midday_check)
         schedule.every().day.at("17:00").do(self._end_of_day)
         schedule.every().friday.at("17:30").do(self._weekly_report)
-        schedule.every(15).minutes.do(self._check_replies)
-        schedule.every(15).minutes.do(self._hubspot_pull)
+        schedule.every(sched_minutes("CHECK_REPLIES")).minutes.do(self._check_replies)
+        schedule.every(sched_minutes("HUBSPOT_PULL")).minutes.do(self._hubspot_pull)
         # Auto-resposta a replies — a cada 15 min
-        schedule.every(15).minutes.do(self._process_auto_replies)
+        schedule.every(sched_minutes("AUTO_REPLIES")).minutes.do(self._process_auto_replies)
         # Envio de mensagens agendadas — a cada 5 min
-        schedule.every(5).minutes.do(self._send_scheduled_messages)
+        schedule.every(sched_minutes("SEND_SCHEDULED")).minutes.do(self._send_scheduled_messages)
         # Lead scoring dinamico — a cada 30 min
-        schedule.every(30).minutes.do(self._update_dynamic_scores)
+        schedule.every(sched_minutes("DYNAMIC_SCORES")).minutes.do(self._update_dynamic_scores)
         # Detector de sinais de compra (intent alerts) — a cada 30 min
-        schedule.every(30).minutes.do(self._check_buying_signals)
+        schedule.every(sched_minutes("BUYING_SIGNALS")).minutes.do(self._check_buying_signals)
         # Score de urgencia unificado (F2) — a cada 30 min, DEPOIS dos sub-scores
-        schedule.every(30).minutes.do(self._update_urgency_scores)
+        schedule.every(sched_minutes("URGENCY_SCORES")).minutes.do(self._update_urgency_scores)
         # NOTA: digest de urgencia NAO e mais agendado separadamente —
         # foi integrado ao _morning_briefing() para enviar UMA so mensagem
         # Auto-healing (F6 Fase 3A) — a cada 30 min, apos urgency
         # Detecta problemas e tenta remediar (restart bridge, notifica Fernando)
-        schedule.every(30).minutes.do(self._auto_heal_system)
+        schedule.every(sched_minutes("AUTO_HEAL")).minutes.do(self._auto_heal_system)
         # Activity engine (redesign v2 F1) — agenda do time: varredor de
         # auto-resolucao + criacao pelas regras (docs/SPEC_AGENDA_METAS.md).
         # Idempotente por dedupe_key; tambem rodara no load da Home (F2).
-        schedule.every(30).minutes.do(self._run_activity_engine)
+        schedule.every(sched_minutes("ACTIVITY_ENGINE")).minutes.do(self._run_activity_engine)
         # Retreino semanal do modelo preditivo (domingo 03:00)
         schedule.every().sunday.at("03:00").do(self._retrain_predictive_model)
 
@@ -152,9 +181,9 @@ class IALexScheduler:
         )
 
         # Outlook Calendar — poll + briefings + pós-reunião
-        schedule.every(15).minutes.do(self._poll_outlook_calendar)
-        schedule.every(5).minutes.do(self._check_pre_meeting_briefings)
-        schedule.every(15).minutes.do(self._check_post_meeting_followup)
+        schedule.every(sched_minutes("OUTLOOK_POLL")).minutes.do(self._poll_outlook_calendar)
+        schedule.every(sched_minutes("PRE_MEETING")).minutes.do(self._check_pre_meeting_briefings)
+        schedule.every(sched_minutes("POST_MEETING")).minutes.do(self._check_post_meeting_followup)
 
         # Pipeline automatico dinamico (carregado da config do banco)
         self._register_automated_pipeline()
